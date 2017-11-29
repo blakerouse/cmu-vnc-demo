@@ -1,4 +1,4 @@
-#!/bin/env python3
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -49,7 +49,7 @@ def disconnect_vpn(vpn):
 
 
 def create(user):
-    """Create the VM in the cloudlet and connect to it with VNC."""
+    """Create the VM in the cloudlet."""
     with open('vnc-overlay.zip', 'rb') as stream:
         files = {
             'overlay': stream.read()
@@ -67,11 +67,38 @@ def create(user):
     return resp.json()
 
 
+def migrate(user):
+    """Migrate the VM in the cloudlet."""
+    print('Requesting VM be migrated.')
+    resp = requests.post(
+        'http://orangebox72.elijah.cs.cmu.edu:3000/',
+        data={
+            'user_id': user,
+            'app_id': 'vncdesktop',
+            'migrate': 'http://172.27.72.1:2000/'
+        })
+    if resp.status_code != 201:
+        raise Exception('Failed to migrate VM into cloudlet: %s' % resp.text)
+    return resp.json()
+
+
 def destroy(user):
     """Destroy the VM in the cloudlet."""
     print('Requesting VM to be destroyed in cloudlet.')
     requests.delete(
         'http://orangebox72.elijah.cs.cmu.edu:2000/',
+        params={
+            'user_id': user,
+            'app_id': 'vncdesktop',
+        })
+    print('VM destroyed in cloudlet.')
+
+
+def destroy_after_migration(user):
+    """Destroy the VM in the cloudlet after migrated."""
+    print('Requesting VM to be destroyed in cloudlet.')
+    requests.delete(
+        'http://orangebox72.elijah.cs.cmu.edu:3000/',
         params={
             'user_id': user,
             'app_id': 'vncdesktop',
@@ -115,6 +142,15 @@ def destroy_vnc_server(vpn):
     thread.join()
 
 
+def get_user_input():
+    """Get the user input on what to do."""
+    while True:
+        resp = input('What do you want to do? [destroy/migrate] ')
+        if resp not in ['destroy', 'migrate']:
+            continue
+        return resp
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -129,6 +165,7 @@ def main():
         sys.exit(1)
     vpn = None
     vnc = None
+    migrated = False
     try:
         resp = create(args.user)
         try:
@@ -143,8 +180,31 @@ def main():
         finally:
             if vpn:
                 disconnect_vpn(vpn)
-    finally:
-        destroy(args.user)
+
+        cmd = get_user_input()
+        if cmd == 'destroy':
+            destroy(args.user)
+        elif cmd == 'migrate':
+            resp = migrate(args.user)
+            migrated = True
+            try:
+                vpn = connect_vpn(resp['vpn'])
+                try:
+                    vnc = spawn_vnc_server(resp['ip'])
+                    print('Spawning the VNC client.')
+                    subprocess.check_output(['gvncviewer', 'localhost'])
+                finally:
+                    if vnc:
+                        destroy_vnc_server(vnc)
+            finally:
+                if vpn:
+                    disconnect_vpn(vpn)
+            destroy_after_migration(args.user)
+    except (Exception, KeyboardInterrupt):
+        if migrated:
+            destroy_after_migration(args.user)
+        else:
+            destroy(args.user)
 
 
 if __name__ == '__main__':
